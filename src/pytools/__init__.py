@@ -1,0 +1,9 @@
+"""House-style Python plumbing shared across midnightodyssey projects.
+
+Plumbing only: Decimal money parsing, typed errors, logging setup. Quant analytics
+live in ``quant-utils``, not here.
+"""
+
+from __future__ import annotations
+
+__version__ = "0.1.0"
