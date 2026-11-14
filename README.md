@@ -8,7 +8,7 @@ parsing, typed errors, and standard logging setup. Used by our projects.
 ## Install
 
 ```
-pip install "pytools @ git+https://github.com/midnightodyssey/pytools.git@v0.1.0"
+pip install "pytools @ git+https://github.com/midnightodyssey/pytools.git@v0.1.1"
 ```
 
 Optional extras: `pytools[pydantic]`, `pytools[click]`. No runtime dependencies otherwise.

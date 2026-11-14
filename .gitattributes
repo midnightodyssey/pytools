@@ -1,0 +1,4 @@
+# Keep LF in working copies even with core.autocrlf=true on Windows:
+# ruff is configured with line-ending = "lf", so CRLF checkouts fail the format gate.
+* text=auto eol=lf
+*.whl binary
