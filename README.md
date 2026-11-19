@@ -12,7 +12,7 @@ pip install "pytools @ git+https://github.com/midnightodyssey/pytools.git@v0.1.1
 ```
 
 Optional extras: `pytools[pydantic]`, `pytools[click]`. No runtime dependencies otherwise.
-Requires Python >= 3.12.
+Requires Python >= 3.12. CI tests 3.12 and 3.14.
 
 ## Modules
 
