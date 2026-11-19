@@ -8,10 +8,11 @@ parsing, typed errors, and standard logging setup. Used by our projects.
 ## Install
 
 ```
-pip install "pytools @ git+https://github.com/midnightodyssey/pytools.git@v0.1.1"
+pip install "pytools @ git+https://github.com/midnightodyssey/pytools.git@v0.2.0"
 ```
 
-Optional extras: `pytools[pydantic]`, `pytools[click]`. No runtime dependencies otherwise.
+Optional extras: `pytools[pydantic]`, `pytools[click]`, `pytools[http]`, `pytools[crypto]`.
+No runtime dependencies otherwise.
 Requires Python >= 3.12. CI tests 3.12 and 3.14.
 
 ## Modules
@@ -25,6 +26,27 @@ Requires Python >= 3.12. CI tests 3.12 and 3.14.
   (wrap and re-raise as a typed error `from exc`).
 - `pytools.logging` — `configure_logging(app_name, ...)`: rotating file handler plus console,
   house format, never blocks startup.
+- `pytools.http` (`pytools[http]`) — httpx `RetryTransport` / `AsyncRetryTransport`:
+  exponential backoff with full jitter on 429 and transient 5xx, honouring `Retry-After`
+  (capped by `RetryPolicy.max_retry_after`), plus `RateLimiter` / `AsyncRateLimiter` and
+  typed `HttpError`s. 5xx and ambiguous transport failures are retried **only for idempotent
+  methods** unless `RetryPolicy(retry_non_idempotent=True)`, so by default a POST is
+  re-sent only when the server cannot have processed it (429, or the connection was never
+  made). Narrow `RetryPolicy(idempotent_methods=...)` if a venue uses PUT/DELETE for order
+  amends. One-shot (iterator/generator) bodies are sent once and never retried. Retries
+  replay the identical request, so a signed request reuses its timestamp and nonce. Logs and errors never carry bodies, header
+  values or query strings, but httpx's own `httpx` logger prints full URLs at INFO: raise it
+  to WARNING if you put secrets in query strings.
+
+  ```python
+  client = httpx.Client(transport=RetryTransport(policy=RetryPolicy(), rate_limiter=RateLimiter(10, 1.0)))
+  response = raise_for_status(client.get("https://api.example.com/v1/markets"))
+  ```
+- `pytools.crypto` (`pytools[crypto]`) — `load_private_key(Path | bytes, password=None)` for
+  Ed25519 or RSA PEM keys (any other type raises `UnsupportedKeyTypeError` naming it; a bare
+  `str` is rejected as ambiguous), `sign(key, message)` (Ed25519, or RSA-PSS SHA-256 with
+  MGF1-SHA-256 and a 32-byte salt by default), and strict standard / URL-safe base64 helpers.
+  Callers build their own pre-sign strings and headers; nothing venue-specific lives here.
 
 ## Versioning
 
