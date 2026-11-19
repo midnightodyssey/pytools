@@ -6,11 +6,13 @@ Python here follows the house style in the `dev-standards` repo: read `STYLE.md`
 writing code (section 0 is the short version). `DELTAS.md` there lists where existing code
 does not yet comply, so don't treat non-compliant code as precedent.
 
+`scripts/check.sh` is the gate (ruff, mypy, pytest, UTF-8); it uses `.venv` when present.
+
 ## Agent skills
 
 ### Issue tracker
 
-Issues are tracked in this repo's GitHub Issues (`gh` CLI). See `docs/agents/issue-tracker.md`.
+**Before any `gh` call**, read `docs/agents/issue-tracker.md`: issues live in this repo's GitHub Issues.
 
 ### Triage labels
 
