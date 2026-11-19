@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -278,3 +279,206 @@ def test_status_armed_for_non_utf8_garbage(tmp_path: Path) -> None:
     path = tmp_path / "KILL"
     path.write_bytes(b"\xff\xfe\x00garbage")
     assert KillSwitch(path).status().armed is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["1" * 5000, "[" * 200000],
+    ids=["5000-digit-int", "200000-open-brackets"],
+)
+def test_status_never_raises_for_pathological_json(tmp_path: Path, payload: str) -> None:
+    path = tmp_path / "KILL"
+    path.write_text(payload, encoding="utf-8")
+    status = KillSwitch(path).status()
+    assert status == KillSwitchStatus(
+        armed=True, reason="armed (no reason recorded)", armed_at=None, actor=None
+    )
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted here")
+
+
+def test_status_armed_for_dangling_symlink(tmp_path: Path) -> None:
+    path = tmp_path / "KILL"
+    _symlink_or_skip(path, tmp_path / "missing-target")
+    status = KillSwitch(path).status()
+    assert status == KillSwitchStatus(
+        armed=True, reason="armed (dangling symlink)", armed_at=None, actor=None
+    )
+
+
+def test_status_follows_symlink_to_regular_file(tmp_path: Path) -> None:
+    target = tmp_path / "real.json"
+    target.write_text('{"reason": "via link"}', encoding="utf-8")
+    path = tmp_path / "KILL"
+    _symlink_or_skip(path, target)
+    assert KillSwitch(path).status().reason == "via link"
+
+
+def test_status_armed_when_stat_says_missing_but_lstat_finds_an_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "KILL"
+    path.touch()
+    _fail_stat_for(monkeypatch, path, FileNotFoundError("dangling"))
+    status = KillSwitch(path).status()
+    assert status == KillSwitchStatus(
+        armed=True, reason="armed (dangling symlink)", armed_at=None, actor=None
+    )
+
+
+def test_disarm_removes_entry_that_stat_reports_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "KILL"
+    path.touch()
+    _fail_stat_for(monkeypatch, path, FileNotFoundError("dangling"))
+    assert KillSwitch(path).disarm() is True
+    monkeypatch.undo()
+    assert not path.exists()
+
+
+def test_status_armed_with_unreadable_reason_when_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "KILL"
+    path.write_text("x", encoding="utf-8")
+
+    def fake_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    status = KillSwitch(path).status()
+    assert status == KillSwitchStatus(
+        armed=True, reason="armed (state unreadable: locked)", armed_at=None, actor=None
+    )
+
+
+def test_status_non_utf8_content_reports_state_unreadable(tmp_path: Path) -> None:
+    path = tmp_path / "KILL"
+    path.write_bytes(b"\xff\xfe\x00garbage")
+    status = KillSwitch(path).status()
+    assert status.armed is True
+    assert status.reason is not None
+    assert status.reason.startswith("armed (state unreadable: ")
+
+
+def test_arm_failure_error_carries_path_and_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "KILL"
+    _fail_replace(monkeypatch)
+    with pytest.raises(KillSwitchError) as info:
+        KillSwitch(path).arm("r")
+    assert info.value.path == path
+    assert "check permissions" in str(info.value)
+    assert str(path) in str(info.value)
+
+
+def test_disarm_directory_error_carries_path_and_remedy(tmp_path: Path) -> None:
+    path = tmp_path / "KILL"
+    path.mkdir()
+    with pytest.raises(KillSwitchError) as info:
+        KillSwitch(path).disarm()
+    assert info.value.path == path
+    assert "by hand" in str(info.value)
+
+
+def test_disarm_unlink_failure_raises_kill_switch_error_from_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "KILL"
+    path.touch()
+
+    def fake_unlink(*args: Any, **kwargs: Any) -> None:
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(os, "unlink", fake_unlink)
+    with pytest.raises(KillSwitchError, match="locked") as info:
+        KillSwitch(path).disarm()
+    assert isinstance(info.value.__cause__, PermissionError)
+    assert info.value.path == path
+    assert "check permissions" in str(info.value)
+
+
+def test_disarm_returns_false_when_file_vanishes_before_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "KILL"
+    path.touch()
+
+    def fake_unlink(*args: Any, **kwargs: Any) -> None:
+        raise FileNotFoundError("gone")
+
+    monkeypatch.setattr(os, "unlink", fake_unlink)
+    assert KillSwitch(path).disarm() is False
+
+
+@pytest.mark.parametrize("exc_type", [RuntimeError, KeyboardInterrupt])
+def test_arm_non_oserror_propagates_unchanged_and_leaves_no_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_type: type[BaseException]
+) -> None:
+    def fake_replace(*args: Any, **kwargs: Any) -> None:
+        raise exc_type("boom")
+
+    monkeypatch.setattr(os, "replace", fake_replace)
+    with pytest.raises(exc_type):
+        KillSwitch(tmp_path / "KILL").arm("r")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_arm_write_failing_with_non_oserror_leaves_no_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_dumps(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("encode failed")
+
+    real_fdopen = os.fdopen
+
+    def fake_fdopen(fd: int, *args: Any, **kwargs: Any) -> Any:
+        handle = real_fdopen(fd, *args, **kwargs)
+        handle.write = fake_dumps
+        return handle
+
+    monkeypatch.setattr(os, "fdopen", fake_fdopen)
+    with pytest.raises(RuntimeError, match="encode failed"):
+        KillSwitch(tmp_path / "KILL").arm("r")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_arm_closes_raw_fd_and_removes_temp_when_fdopen_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[int] = []
+    real_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args: Any, **kwargs: Any) -> tuple[int, str]:
+        fd, name = real_mkstemp(*args, **kwargs)
+        opened.append(fd)
+        return fd, name
+
+    def fake_fdopen(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("no handles")
+
+    monkeypatch.setattr(tempfile, "mkstemp", recording_mkstemp)
+    monkeypatch.setattr(os, "fdopen", fake_fdopen)
+    with pytest.raises(KillSwitchError, match="no handles"):
+        KillSwitch(tmp_path / "KILL").arm("r")
+    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
+def test_arm_failure_does_not_claim_still_armed_when_no_file_is_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "KILL"
+    _fail_stat_for(monkeypatch, path, PermissionError("denied"))
+    _fail_replace(monkeypatch)
+    with pytest.raises(KillSwitchError) as info:
+        KillSwitch(path).arm("r")
+    assert "still armed" not in str(info.value)
