@@ -8,7 +8,7 @@ parsing, typed errors, and standard logging setup. Used by our projects.
 ## Install
 
 ```
-pip install "pytools @ git+https://github.com/midnightodyssey/pytools.git@v0.1.1"
+pip install "pytools @ git+https://github.com/midnightodyssey/pytools.git@v0.3.0"
 ```
 
 Optional extras: `pytools[pydantic]`, `pytools[click]`. No runtime dependencies otherwise.
@@ -25,6 +25,10 @@ Requires Python >= 3.12. CI tests 3.12 and 3.14.
   (wrap and re-raise as a typed error `from exc`).
 - `pytools.logging` â€” `configure_logging(app_name, ...)`: rotating file handler plus console,
   house format, never blocks startup.
+- `pytools.killswitch` — `KillSwitch(path)`: file-backed kill switch, fail-closed (any doubt is
+  armed), `os.stat` on every `status()` call (no caching), atomic `arm()`, and a hand `touch`
+  arms it. File contents never decide armed; JSON `{armed_at, reason, actor}` is compatible with
+  predarb's format. `raise_if_armed()` raises `KillSwitchArmedError`.
 
 ## Versioning
 
