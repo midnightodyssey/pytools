@@ -8,7 +8,7 @@ parsing, typed errors, and standard logging setup. Used by our projects.
 ## Install
 
 ```
-pip install "pytools @ git+https://github.com/midnightodyssey/pytools.git@v0.2.0"
+pip install "pytools @ git+https://github.com/midnightodyssey/pytools.git@v0.3.0"
 ```
 
 Optional extras: `pytools[pydantic]`, `pytools[click]`, `pytools[http]`, `pytools[crypto]`.
@@ -47,6 +47,10 @@ Requires Python >= 3.12. CI tests 3.12 and 3.14.
   `str` is rejected as ambiguous), `sign(key, message)` (Ed25519, or RSA-PSS SHA-256 with
   MGF1-SHA-256 and a 32-byte salt by default), and strict standard / URL-safe base64 helpers.
   Callers build their own pre-sign strings and headers; nothing venue-specific lives here.
+- `pytools.killswitch` — `KillSwitch(path)`: file-backed kill switch, fail-closed (any doubt is
+  armed), `os.stat` on every `status()` call (no caching), atomic `arm()`, and a hand `touch`
+  arms it. File contents never decide armed; JSON `{armed_at, reason, actor}` is compatible with
+  predarb's format. `raise_if_armed()` raises `KillSwitchArmedError`.
 
 ## Versioning
 

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pytools"
-version = "0.2.0"
-description = "House-style Python plumbing (Decimal money parsing, typed errors, logging, HTTP retry, request signing) shared across midnightodyssey projects"
+version = "0.3.0"
+description = "House-style Python plumbing (Decimal money parsing, typed errors, logging, HTTP retry, request signing, kill switch) shared across midnightodyssey projects"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
