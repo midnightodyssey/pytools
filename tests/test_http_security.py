@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import random
+import socket
+import traceback
 
 import httpx
 import pytest
@@ -13,6 +15,7 @@ from pytools.http import (
     RetryTransport,
     raise_for_status,
 )
+from pytools.http._errors import safe_url
 
 SECRETS = ("sekret-header-value", "sekret-query-value", "sekret-body-value")
 URL = "https://api.example.test/v1/orders?token=sekret-query-value"
@@ -82,3 +85,70 @@ def test_no_secrets_on_429_post_and_transport_failure(caplog: pytest.LogCaptureF
     _assert_clean(_all_text(caplog, info.value))
     assert "token=" not in str(info.value)
     assert str(info.value) == "POST https://api.example.test/v1/orders failed: ConnectError"
+
+
+# ---- review fixes: __cause__ leak, safe_url, one-shot bodies ---------------------------
+
+
+def _chain(exc: BaseException | None) -> list[BaseException]:
+    seen: list[BaseException] = []
+    while exc is not None and exc not in seen:
+        seen.append(exc)
+        exc = exc.__cause__ or exc.__context__
+    return seen
+
+
+def test_protocol_error_cause_does_not_leak_header_value() -> None:
+    secret = "SECRETSIG"
+    transport = RetryTransport(httpx.HTTPTransport(), sleep=lambda _s: None)
+    # httpx connects before h11 validates headers, so give it a local listener to connect to.
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        url = f"http://127.0.0.1:{listener.getsockname()[1]}/x"
+        with httpx.Client(transport=transport) as client, pytest.raises(HttpTransportError) as info:
+            client.get(url, headers={"X-Signature": f"{secret}\nabc"})
+    err = info.value
+    assert err.error_type == "LocalProtocolError"
+    assert err.__cause__ is None
+    assert err.__context__ is None
+    for link in _chain(err):
+        assert secret not in str(link)
+        assert secret not in repr(link)
+    rendered = "".join(traceback.format_exception(err))
+    assert secret not in rendered
+
+
+def test_safe_cause_classes_are_chained() -> None:
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out")
+
+    with (
+        httpx.Client(transport=RetryTransport(httpx.MockTransport(boom))) as client,
+        pytest.raises(HttpTransportError) as info,
+    ):
+        client.post("https://api.example.test/x", content=b"x")
+    assert isinstance(info.value.__cause__, httpx.ReadTimeout)
+
+
+def test_safe_url_keeps_path_encoded_and_blocks_log_forgery() -> None:
+    url = httpx.URL("https://h.test/a%0AFAKE%20LOG%20LINE?x=1")
+    text = safe_url(url)
+    assert text == "https://h.test/a%0AFAKE%20LOG%20LINE"
+    assert "\n" not in text
+    assert "x=1" not in text
+
+
+def test_safe_url_brackets_ipv6_and_drops_userinfo() -> None:
+    text = safe_url(httpx.URL("http://user:pw@[::1]:8080/p?q=secret"))
+    assert text == "http://[::1]:8080/p"
+
+
+def test_forged_path_not_in_retry_log(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    transport = httpx.MockTransport(lambda request: httpx.Response(503))
+    with _client(transport) as client:
+        client.get("https://h.test/a%0AFAKE%20LOG%20LINE?x=1")
+    ours = [r.getMessage() for r in caplog.records if r.name.startswith("pytools")]
+    assert ours
+    assert all("\n" not in m for m in ours)

@@ -4,9 +4,14 @@ Use as ``httpx.Client(transport=RetryTransport(policy=..., rate_limiter=...))``.
 
 * Status retries: when attempts run out the last response is returned (httpx
   convention); use :func:`pytools.http.raise_for_status` to turn it into an error.
-* Transport errors always surface as :class:`HttpTransportError` ``from exc``, whether
-  or not they were retried.
-* Request bodies must be replayable (bytes, JSON, form data), not one-shot iterators.
+* Transport errors always surface as :class:`HttpTransportError`, whether or not they
+  were retried. The httpx exception is chained as ``__cause__`` only for connect/timeout
+  classes whose messages carry no request data; any other class (e.g. a protocol error
+  quoting a bad header value) is chained ``from None``, keeping ``error_type``.
+* Requests with a one-shot body (generator/iterator) are sent once and never retried;
+  in-memory (bytes, JSON, form) and multipart bodies are replayable.
+* Retries replay the identical request: see :mod:`pytools.http._retry` for the
+  signed-request (same timestamp/nonce) caveat.
 * Each attempt takes a rate-limiter slot.
 
 See :mod:`pytools.http._retry` for the idempotency rule.
@@ -23,7 +28,7 @@ import httpx
 
 from pytools.http._errors import HttpTransportError, safe_url
 from pytools.http._ratelimit import AsyncRateLimiter, RateLimiter
-from pytools.http._retry import RetryEngine, RetryPolicy
+from pytools.http._retry import RetryEngine, RetryPolicy, is_replayable, keeps_cause
 
 __all__ = ["AsyncRetryTransport", "RetryTransport"]
 
@@ -51,21 +56,33 @@ class RetryTransport(httpx.BaseTransport):
         self._sleep = sleep
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        replayable = is_replayable(request)
         attempt = 1
         while True:
             if self._limiter is not None:
                 self._limiter.acquire()
+            delay = 0.0
+            failure: HttpTransportError | None = None
+            cause: Exception | None = None
             try:
                 response = self._inner.handle_request(request)
             except httpx.TransportError as exc:
-                delay = self._engine.error_delay(request, exc, attempt)
-                if delay is None:
-                    raise _transport_error(request, exc) from exc
+                maybe = self._engine.error_delay(request, exc, attempt, replayable)
+                if maybe is None:
+                    failure = _transport_error(request, exc)
+                    cause = exc if keeps_cause(exc) else None
+                else:
+                    delay = maybe
             else:
-                delay = self._engine.status_delay(request, response, attempt)
-                if delay is None:
+                maybe = self._engine.status_delay(request, response, attempt, replayable)
+                if maybe is None:
                     return response
+                delay = maybe
                 response.close()
+            if failure is not None:  # raised outside `except` so __context__ stays empty
+                if cause is None:
+                    raise failure
+                raise failure from cause
             self._sleep(delay)
             attempt += 1
 
@@ -92,21 +109,33 @@ class AsyncRetryTransport(httpx.AsyncBaseTransport):
         self._sleep = sleep
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        replayable = is_replayable(request)
         attempt = 1
         while True:
             if self._limiter is not None:
                 await self._limiter.acquire()
+            delay = 0.0
+            failure: HttpTransportError | None = None
+            cause: Exception | None = None
             try:
                 response = await self._inner.handle_async_request(request)
             except httpx.TransportError as exc:
-                delay = self._engine.error_delay(request, exc, attempt)
-                if delay is None:
-                    raise _transport_error(request, exc) from exc
+                maybe = self._engine.error_delay(request, exc, attempt, replayable)
+                if maybe is None:
+                    failure = _transport_error(request, exc)
+                    cause = exc if keeps_cause(exc) else None
+                else:
+                    delay = maybe
             else:
-                delay = self._engine.status_delay(request, response, attempt)
-                if delay is None:
+                maybe = self._engine.status_delay(request, response, attempt, replayable)
+                if maybe is None:
                     return response
+                delay = maybe
                 await response.aclose()
+            if failure is not None:  # raised outside `except` so __context__ stays empty
+                if cause is None:
+                    raise failure
+                raise failure from cause
             await self._sleep(delay)
             attempt += 1
 

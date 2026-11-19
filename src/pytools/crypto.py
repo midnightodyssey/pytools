@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
 from pytools.errors import AppError
 
 __all__ = [
+    "MIN_RSA_KEY_BITS",
     "CryptoError",
     "EncodingError",
     "InvalidKeyError",
@@ -49,8 +50,18 @@ _log = logging.getLogger(__name__)
 
 _ENCRYPTED_MARKER = b"ENCRYPTED"
 
-PssSaltLength = int | padding._MaxLength | padding._DigestLength
-"""A non-negative int, ``padding.PSS.DIGEST_LENGTH`` or ``padding.PSS.MAX_LENGTH``."""
+MIN_RSA_KEY_BITS = 2048
+"""Smallest RSA modulus :func:`load_private_key` accepts."""
+
+PssSaltLength = int | object
+"""A non-negative int, ``padding.PSS.DIGEST_LENGTH`` or ``padding.PSS.MAX_LENGTH``.
+
+The two sentinels have no public type, so the alias is ``object``-wide; :func:`sign`
+validates by identity at runtime.
+"""
+
+_PEM_BLOCK_RE = re.compile(rb"\s*-----BEGIN [^-\r\n]+-----.*-----END [^-\r\n]+-----\s*", re.DOTALL)
+_PEM_BEGIN = b"-----BEGIN "
 
 
 class CryptoError(AppError):
@@ -167,6 +178,7 @@ def load_private_key(source: Path | bytes, password: bytes | str | None = None) 
         UnsupportedKeyTypeError: a valid key that is neither Ed25519 nor RSA.
     """
     pem = _read_source(source)
+    _check_single_pem_block(pem)
     secret = _normalise_password(password)
     encrypted = _ENCRYPTED_MARKER in pem
     if encrypted and secret is None:
@@ -189,10 +201,27 @@ def load_private_key(source: Path | bytes, password: bytes | str | None = None) 
     return key
 
 
+def _check_single_pem_block(pem: bytes) -> None:
+    """Refuse to guess: exactly one PEM block, with nothing but whitespace around it."""
+    blocks = pem.count(_PEM_BEGIN)
+    if blocks > 1:
+        raise InvalidKeyError(
+            f"expected exactly one PEM block but found {blocks}; refusing to pick one"
+        )
+    if blocks == 0 or not _PEM_BLOCK_RE.fullmatch(pem):
+        raise InvalidKeyError(
+            "not a valid PEM private key (not exactly one PEM block, or data outside it)"
+        )
+
+
 def _wrap(loaded: object) -> PrivateKey:
     if isinstance(loaded, ed25519.Ed25519PrivateKey):
         return PrivateKey(KeyType.ED25519, loaded)
     if isinstance(loaded, rsa.RSAPrivateKey):
+        if loaded.key_size < MIN_RSA_KEY_BITS:
+            raise InvalidKeyError(
+                f"RSA key is {loaded.key_size} bits; the minimum is {MIN_RSA_KEY_BITS}"
+            )
         return PrivateKey(KeyType.RSA, loaded)
     raw = type(loaded).__name__
     name = _UNSUPPORTED_NAMES.get(raw, raw)
@@ -201,14 +230,14 @@ def _wrap(loaded: object) -> PrivateKey:
     )
 
 
-def _validate_salt(salt_length: object) -> int | padding._MaxLength | padding._DigestLength:
+def _validate_salt(salt_length: object) -> int | object:
     if isinstance(salt_length, bool):
         raise SigningError("pss_salt_length must be an int or a PSS length sentinel, not bool")
     if isinstance(salt_length, int):
         if salt_length < 0:
             raise SigningError("pss_salt_length must be >= 0")
         return salt_length
-    if isinstance(salt_length, padding._DigestLength | padding._MaxLength):
+    if salt_length is padding.PSS.DIGEST_LENGTH or salt_length is padding.PSS.MAX_LENGTH:
         return salt_length
     raise SigningError(
         "pss_salt_length must be an int, PSS.DIGEST_LENGTH or PSS.MAX_LENGTH "
@@ -238,7 +267,7 @@ def sign(key: PrivateKey, message: bytes, *, pss_salt_length: PssSaltLength | No
             raise SigningError("pss_salt_length is not applicable to an Ed25519 key")
         return raw.sign(message)
     salt = padding.PSS.DIGEST_LENGTH if pss_salt_length is None else _validate_salt(pss_salt_length)
-    pss = padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=salt)
+    pss = padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=salt)  # type: ignore[arg-type]
     try:
         return raw.sign(message, pss, hashes.SHA256())
     except ValueError as exc:
@@ -272,9 +301,12 @@ def b64decode(text: str | bytes) -> bytes:
     if not _B64_RE.fullmatch(raw):
         raise EncodingError("invalid base64 input")
     try:
-        return base64.b64decode(raw, validate=True)
+        out = base64.b64decode(raw, validate=True)
     except binascii.Error as exc:
         raise EncodingError("invalid base64 input (bad length or padding)") from exc
+    if base64.b64encode(out) != raw:
+        raise EncodingError("non-canonical base64 input (nonzero trailing bits)")
+    return out
 
 
 def urlsafe_b64encode(data: bytes, *, padded: bool = True) -> str:
@@ -298,6 +330,9 @@ def urlsafe_b64decode(text: str | bytes) -> bytes:
         raise EncodingError("invalid URL-safe base64 input (bad length)")
     padded = body + b"=" * (-len(body) % 4)
     try:
-        return base64.b64decode(padded.translate(bytes.maketrans(b"-_", b"+/")), validate=True)
+        out = base64.b64decode(padded.translate(bytes.maketrans(b"-_", b"+/")), validate=True)
     except binascii.Error as exc:
         raise EncodingError("invalid URL-safe base64 input") from exc
+    if base64.urlsafe_b64encode(out).rstrip(b"=") != body:
+        raise EncodingError("non-canonical URL-safe base64 input (nonzero trailing bits)")
+    return out

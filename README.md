@@ -32,7 +32,9 @@ Requires Python >= 3.12. CI tests 3.12 and 3.14.
   typed `HttpError`s. 5xx and ambiguous transport failures are retried **only for idempotent
   methods** unless `RetryPolicy(retry_non_idempotent=True)`, so by default a POST is
   re-sent only when the server cannot have processed it (429, or the connection was never
-  made). Request bodies must be replayable. Logs and errors never carry bodies, header
+  made). Narrow `RetryPolicy(idempotent_methods=...)` if a venue uses PUT/DELETE for order
+  amends. One-shot (iterator/generator) bodies are sent once and never retried. Retries
+  replay the identical request, so a signed request reuses its timestamp and nonce. Logs and errors never carry bodies, header
   values or query strings, but httpx's own `httpx` logger prints full URLs at INFO: raise it
   to WARNING if you put secrets in query strings.
 

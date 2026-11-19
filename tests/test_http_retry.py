@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -334,3 +335,108 @@ async def test_async_exhaustion_returns_last_response() -> None:
     async with async_client(script, RetryPolicy(max_attempts=2)) as client:
         assert (await client.get(URL)).status_code == 503
     assert script.calls == 2
+
+
+# ---- one-shot bodies, policy extras -----------------------------------------------------
+
+
+class _Spy:
+    def __init__(self, response: httpx.Response) -> None:
+        self.bodies: list[bytes] = []
+        self.response = response
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.bodies.append(
+            request.read()
+            if not request.stream.__class__.__name__.startswith("Iterator")
+            else b"".join(request.stream)
+        )  # type: ignore[arg-type]
+        return self.response
+
+
+def _generator() -> object:
+    yield b'{"order":1}'
+
+
+@pytest.mark.parametrize("make_body", [lambda: iter([b'{"order":1}']), _generator])
+def test_one_shot_body_never_retried(make_body: Callable[[], object]) -> None:
+    spy = _Spy(r(429))
+    transport = RetryTransport(httpx.MockTransport(spy), sleep=lambda _s: None)
+    with httpx.Client(transport=transport) as client:
+        response = client.post(URL, content=make_body())  # type: ignore[arg-type]
+    assert response.status_code == 429
+    assert spy.bodies == [b'{"order":1}']
+
+
+def test_one_shot_body_connect_error_raises_typed_without_retry() -> None:
+    calls = 0
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("down")
+
+    transport = RetryTransport(httpx.MockTransport(boom), sleep=lambda _s: None)
+    with httpx.Client(transport=transport) as client, pytest.raises(HttpTransportError):
+        client.post(URL, content=iter([b"x"]))
+    assert calls == 1
+
+
+def test_one_shot_skip_logged_at_debug_without_body(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG, logger="pytools.http")
+    transport = RetryTransport(httpx.MockTransport(lambda req: r(429)), sleep=lambda _s: None)
+    with httpx.Client(transport=transport) as client:
+        client.post(URL, content=iter([b"sekret-body"]))
+    msgs = [(rec.levelno, rec.getMessage()) for rec in caplog.records]
+    assert any(lvl == logging.DEBUG and "one-shot" in m for lvl, m in msgs)
+    assert all("sekret-body" not in m for _, m in msgs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"content": b"x"},
+        {"json": {"a": 1}},
+        {"data": {"a": "b"}},
+        {"files": {"f": ("n.txt", b"x")}},
+    ],
+)
+def test_replayable_bodies_are_retried(kwargs: dict[str, object]) -> None:
+    script = Script([r(429), r(200)])
+    transport = RetryTransport(httpx.MockTransport(script), sleep=lambda _s: None)
+    with httpx.Client(transport=transport) as client:
+        assert client.post(URL, **kwargs).status_code == 200  # type: ignore[arg-type]
+    assert script.calls == 2
+
+
+@pytest.mark.anyio
+async def test_async_one_shot_body_never_retried() -> None:
+    script = Script([r(429), r(200)])
+
+    async def agen():  # type: ignore[no-untyped-def]
+        yield b"x"
+
+    async with async_client(script) as client:
+        response = await client.post(URL, content=agen())
+    assert response.status_code == 429
+    assert script.calls == 1
+
+
+def test_policy_requires_real_int_and_int_statuses() -> None:
+    for bad in (2.5, "3", True):
+        with pytest.raises(ConfigError):
+            RetryPolicy(max_attempts=bad)  # type: ignore[arg-type]
+    for statuses in ({"503"}, {503.5}, {True}, 5):
+        with pytest.raises(ConfigError):
+            RetryPolicy(retry_statuses=statuses)  # type: ignore[arg-type]
+
+
+def test_idempotent_methods_configurable() -> None:
+    policy = RetryPolicy(idempotent_methods={"get"})  # type: ignore[arg-type]
+    assert policy.idempotent_methods == frozenset({"GET"})
+    script = Script([r(503), r(200)])
+    with sync_client(script, policy) as client:
+        assert client.put(URL, content=b"x").status_code == 503  # PUT narrowed out
+    assert script.calls == 1
+    with pytest.raises(ConfigError):
+        RetryPolicy(idempotent_methods={1})  # type: ignore[arg-type]

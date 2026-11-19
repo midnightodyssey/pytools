@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed448, ed25519, padding, rsa, x25519
 
 from pytools.crypto import (
+    MIN_RSA_KEY_BITS,
     CryptoError,
     EncodingError,
     InvalidKeyError,
@@ -199,6 +200,37 @@ def test_malformed(junk: bytes) -> None:
         load_private_key(junk)
 
 
+def test_two_pem_blocks_rejected(ed_key: ed25519.Ed25519PrivateKey) -> None:
+    other = ed25519.Ed25519PrivateKey.generate()
+    with pytest.raises(InvalidKeyError, match="exactly one PEM block but found 2") as info:
+        load_private_key(_pem(ed_key) + _pem(other))
+    assert b"BEGIN" not in str(info.value).encode()
+
+
+def test_trailing_garbage_rejected(ed_key: ed25519.Ed25519PrivateKey) -> None:
+    with pytest.raises(InvalidKeyError, match="not a valid PEM"):
+        load_private_key(_pem(ed_key) + b"garbage\n")
+
+
+def test_leading_junk_rejected(ed_key: ed25519.Ed25519PrivateKey) -> None:
+    with pytest.raises(InvalidKeyError, match="not a valid PEM"):
+        load_private_key(b"junk\n" + _pem(ed_key))
+
+
+def test_surrounding_whitespace_and_crlf_accepted(ed_key: ed25519.Ed25519PrivateKey) -> None:
+    pem = _pem(ed_key)
+    assert load_private_key(b"\n  " + pem + b"\n\n \t\n").key_type is KeyType.ED25519
+    crlf = pem.replace(b"\n", b"\r\n")
+    assert load_private_key(crlf).key_type is KeyType.ED25519
+
+
+def test_small_rsa_key_rejected() -> None:
+    small = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    assert MIN_RSA_KEY_BITS == 2048
+    with pytest.raises(InvalidKeyError, match="1024 bits"):
+        load_private_key(_pem(small))
+
+
 def test_encrypted_key_password_handling(rsa_key: rsa.RSAPrivateKey) -> None:
     pem = _pem(rsa_key, b"s3cret")
     assert load_private_key(pem, b"s3cret").key_type is KeyType.RSA
@@ -276,6 +308,16 @@ def test_strict_standard_decode_fails(bad: str) -> None:
 def test_strict_urlsafe_decode_fails(bad: str) -> None:
     with pytest.raises(EncodingError):
         urlsafe_b64decode(bad)
+
+
+def test_non_canonical_base64_rejected() -> None:
+    assert b64decode("QQ==") == b"A"
+    with pytest.raises(EncodingError, match="non-canonical"):
+        b64decode("QR==")
+    assert urlsafe_b64decode("QQ") == urlsafe_b64decode("QQ==") == b"A"
+    for bad in ("QR", "QR=="):
+        with pytest.raises(EncodingError, match="non-canonical"):
+            urlsafe_b64decode(bad)
 
 
 def test_b64_non_text_input() -> None:

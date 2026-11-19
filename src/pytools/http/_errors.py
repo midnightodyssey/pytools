@@ -15,9 +15,15 @@ __all__ = ["HttpError", "HttpStatusError", "HttpTransportError", "raise_for_stat
 
 
 def safe_url(url: httpx.URL) -> str:
-    """Return ``scheme://host[:port]/path`` with no userinfo, query or fragment."""
+    """Return ``scheme://host[:port]/path`` with no userinfo, query or fragment.
+
+    The path stays percent-encoded (``raw_path``) so an encoded newline in a request
+    URL cannot forge a log line. IPv6 hosts are bracketed.
+    """
+    host = f"[{url.host}]" if ":" in url.host else url.host
     port = f":{url.port}" if url.port is not None else ""
-    return f"{url.scheme}://{url.host}{port}{url.path}"
+    path = url.raw_path.split(b"?", 1)[0].decode("ascii", errors="replace")
+    return f"{url.scheme}://{host}{port}{path}"
 
 
 class HttpError(AppError):
