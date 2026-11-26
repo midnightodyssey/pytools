@@ -4,10 +4,13 @@ import dataclasses
 import json
 import logging
 import os
+import threading
+import traceback
 import urllib.error
 import urllib.request
 from email.message import Message
-from typing import Any
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, ClassVar
 
 import pytest
 
@@ -19,6 +22,7 @@ from pytools.notify import (
     NotifyError,
     Severity,
     SlackWebhookNotifier,
+    _slack,
 )
 
 SECRET = "SECRETSECRET"
@@ -39,14 +43,14 @@ class FakeResponse:
 
 
 class Recorder:
-    """Stands in for ``urlopen``: records requests, then returns or raises ``outcome``."""
+    """Stands in for the opener: records requests, then returns or raises ``outcome``."""
 
     def __init__(self, outcome: int | BaseException = 200) -> None:
         self.outcome = outcome
         self.requests: list[urllib.request.Request] = []
         self.timeouts: list[float | None] = []
 
-    def __call__(self, request: urllib.request.Request, timeout: float | None = None) -> Any:
+    def open(self, request: urllib.request.Request, timeout: float | None = None) -> Any:
         self.requests.append(request)
         self.timeouts.append(timeout)
         if isinstance(self.outcome, BaseException):
@@ -56,7 +60,7 @@ class Recorder:
 
 def install(monkeypatch: pytest.MonkeyPatch, outcome: int | BaseException = 200) -> Recorder:
     recorder = Recorder(outcome)
-    monkeypatch.setattr(urllib.request, "urlopen", recorder)
+    monkeypatch.setattr(_slack, "_OPENER", recorder)
     return recorder
 
 
@@ -339,3 +343,119 @@ def test_value_types_are_frozen() -> None:
         NOTE.title = "x"  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         DeliveryResult(delivered=True).delivered = False  # type: ignore[misc]
+
+
+# ---- URL validation hardening -------------------------------------------------------
+
+BAD_URLS = [
+    f"https://hooks.slack.com/services/T/B/{SECRET[:4]} {SECRET[4:]}",
+    f"https://hooks.slack.com/services/T/B/{SECRET[:4]}\t{SECRET[4:]}",
+    f"https://hooks.slack.com/services/T/B/{SECRET[:4]}\n{SECRET[4:]}",
+    f"https://hooks.slack.com/services/T/B/{SECRET[:4]}\x7f{SECRET[4:]}",
+    f"https://hooks.slack.com/services/T/B/{SECRET}\u00e9",
+    f"https://user:{SECRET}@hooks.slack.com/services/T/B/x",
+    f"https://{SECRET}@hooks.slack.com/services/T/B/x",
+]
+
+
+@pytest.mark.parametrize("bad", BAD_URLS)
+def test_unsafe_urls_rejected_at_construction(bad: str) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        SlackWebhookNotifier(bad)
+    assert SECRET not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad", BAD_URLS)
+def test_unsafe_urls_rejected_from_env(clean_env: pytest.MonkeyPatch, bad: str) -> None:
+    clean_env.setenv("SLACK_WEBHOOK_OPS", bad)
+    with pytest.raises(ConfigError) as excinfo:
+        SlackWebhookNotifier.from_env("ops")
+    assert SECRET not in str(excinfo.value)
+
+
+def test_surrounding_whitespace_is_still_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = install(monkeypatch)
+    SlackWebhookNotifier(f"  {URL}\n").send(NOTE)
+    assert recorder.requests[0].full_url == URL
+
+
+# ---- redirects ----------------------------------------------------------------------
+
+
+def test_redirect_handler_returns_none() -> None:
+    handler = _slack._NoRedirect()
+    request = urllib.request.Request(URL, data=b"{}", method="POST")
+    result = handler.redirect_request(
+        request,
+        None,  # type: ignore[arg-type]
+        302,
+        "Found",
+        Message(),
+        "https://x.test/",
+    )
+    assert result is None
+
+
+class _RedirectServer(BaseHTTPRequestHandler):
+    hits: ClassVar[list[str]] = []
+
+    def do_POST(self) -> None:
+        self.hits.append(self.path)
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.path == "/hook":
+            self.send_response(302)
+            self.send_header("Location", "/target")
+        else:
+            self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_GET = do_POST  # noqa: N815
+
+    def log_message(self, format: str, *args: object) -> None:
+        return None
+
+
+def test_real_opener_does_not_follow_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drives the real handler chain against a local server that 302s to a 200 endpoint."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    _RedirectServer.hits = []
+    server = HTTPServer(("127.0.0.1", 0), _RedirectServer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        notifier = SlackWebhookNotifier(URL)
+        # Bypass the https-only check: a local TLS server is not worth the machinery here.
+        monkeypatch.setattr(notifier, "_url", f"http://127.0.0.1:{server.server_port}/hook")
+        result = notifier.send(NOTE)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result == DeliveryResult(delivered=False, status=302, reason="HTTPError")
+    assert _RedirectServer.hits == ["/hook"]  # the Location was never requested
+
+
+# ---- traceback rendering ------------------------------------------------------------
+
+# Residual risk: tracebacks rendered with frame locals (Sentry, rich show_locals) can see
+# the URL held by the notifier; only plain traceback text is asserted URL-free here.
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        # urllib builds it as HTTPError(req.full_url, code, msg, hdrs, fp); str() omits the URL.
+        urllib.error.HTTPError(URL, 503, "Service Unavailable", Message(), None),
+        urllib.error.URLError(OSError("connection refused")),
+        TimeoutError("timed out"),
+    ],
+    ids=["http_error", "url_error", "timeout"],
+)
+def test_rendered_traceback_has_no_url_for_realistic_failures(
+    monkeypatch: pytest.MonkeyPatch, outcome: BaseException
+) -> None:
+    install(monkeypatch, outcome)
+    with pytest.raises(NotifyError) as excinfo:
+        SlackWebhookNotifier(URL).send_or_raise(NOTE)
+    assert SECRET not in "".join(traceback.format_exception(excinfo.value))

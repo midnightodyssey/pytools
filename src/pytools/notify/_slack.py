@@ -2,9 +2,11 @@
 
 A webhook URL carries its secret in the path, so this module is built on stdlib
 ``urllib.request`` rather than :mod:`pytools.http` (see ``docs/adr/0001``). The rule here:
-**the URL never reaches a log record, a ``repr`` or an exception message.** Failures are
-described by destination name, HTTP status and exception class name only; a caught
-exception's own text is never interpolated, because ``URLError`` text can embed the URL.
+**the URL never reaches a log record, a ``repr`` or an exception message** (tracebacks
+rendered with frame locals are outside that guarantee, see
+:class:`SlackWebhookNotifier`). Failures are described by destination name, HTTP
+status and exception class name only; a caught exception's own text is never
+interpolated, because ``URLError`` text can embed the URL.
 Exception chaining (``from exc``) is kept for debugging; the raised message is URL-free.
 """
 
@@ -16,7 +18,8 @@ import logging
 import os
 import urllib.error
 import urllib.request
-from typing import Final
+from email.message import Message
+from typing import IO, Final
 from urllib.parse import urlsplit
 
 from pytools.errors import ConfigError
@@ -47,12 +50,46 @@ def _env_var_name(destination: str) -> str:
 
 
 def _validate_url(url: str, source: str) -> str:
-    """Require an absolute https URL. Messages name ``source``, never the URL itself."""
+    """Require a clean absolute https URL. Messages name ``source``, never the URL itself.
+
+    Rejects non-ASCII, whitespace/control characters and userinfo: the first two make
+    ``http.client`` raise errors whose text embeds the path (the secret), and none of them
+    is ever valid in a webhook URL.
+    """
     stripped = url.strip()
-    parts = urlsplit(stripped)
-    if parts.scheme != "https" or not parts.netloc:
-        raise ConfigError(f"{source} must be an https webhook URL (value not shown)")
+    problem = f"{source} must be a plain https webhook URL (value not shown)"
+    if not stripped.isascii() or any(c <= " " or c == "\x7f" for c in stripped):
+        raise ConfigError(problem)
+    try:
+        parts = urlsplit(stripped)
+        has_userinfo = parts.username is not None or parts.password is not None
+    except ValueError as exc:
+        raise ConfigError(problem) from exc
+    if parts.scheme != "https" or not parts.netloc or has_userinfo:
+        raise ConfigError(problem)
     return stripped
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: a 3xx surfaces as ``HTTPError`` and counts as undelivered.
+
+    Following one would re-send a POST as a GET elsewhere, and a 2xx there would be
+    reported as delivered although Slack received nothing.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: Message,
+        newurl: str,
+    ) -> None:
+        return None
+
+
+_OPENER: Final = urllib.request.build_opener(_NoRedirect)
 
 
 def format_text(notification: Notification) -> str:
@@ -73,8 +110,13 @@ class SlackWebhookNotifier:
     Makes exactly one attempt per notification: no retry. ``send()`` is best-effort and
     never raises on delivery failure; ``send_or_raise()`` is the strict variant.
 
+    The URL is kept out of logs, ``repr`` and exception messages. It is still held in an
+    instance attribute, so a traceback renderer that captures frame locals (Sentry, rich
+    ``show_locals``) will see it; scrub such tools' output if that matters.
+
     Args:
-        webhook_url: The incoming-webhook URL. Must be ``https``.
+        webhook_url: The incoming-webhook URL. Must be a plain ``https`` URL: no userinfo,
+            whitespace, control or non-ASCII characters.
         timeout: Per-attempt timeout in seconds; must be positive.
         destination: Name used in log lines and ``repr``; ``"default"`` when omitted.
 
@@ -153,7 +195,7 @@ class SlackWebhookNotifier:
             self._url, data=data, headers={"Content-Type": "application/json"}, method="POST"
         )
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            with _OPENER.open(request, timeout=self._timeout) as response:
                 status = int(response.status)
         except urllib.error.HTTPError as exc:
             return DeliveryResult(False, status=exc.code, reason=type(exc).__name__), exc
