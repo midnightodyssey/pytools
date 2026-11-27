@@ -36,6 +36,9 @@ TRUNCATION_MARKER: Final = "…(truncated)"
 DEFAULT_ENV_VAR: Final = "SLACK_WEBHOOK_URL"
 DEFAULT_ALLOWED_HOSTS: Final = ("hooks.slack.com",)
 HTTPS_PORT: Final = 443
+#: Half-open range [200, 300) of HTTP success statuses.
+SUCCESS_STATUS_MIN: Final = 200
+SUCCESS_STATUS_MAX: Final = 300
 
 _PREFIXES: Final = {
     Severity.INFO: "",
@@ -236,6 +239,6 @@ class SlackWebhookNotifier:
             return DeliveryResult(False, status=exc.code, reason=type(exc).__name__), exc
         except _TRANSPORT_ERRORS as exc:
             return DeliveryResult(False, reason=type(exc).__name__), exc
-        if 200 <= status < 300:
+        if SUCCESS_STATUS_MIN <= status < SUCCESS_STATUS_MAX:
             return DeliveryResult(True, status=status), None
         return DeliveryResult(False, status=status, reason=f"HTTP {status}"), None

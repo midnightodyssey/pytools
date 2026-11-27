@@ -12,6 +12,11 @@ TEXT_SUFFIXES = frozenset(
 
 
 def main() -> int:
+    """Fail if any tracked text file is not valid UTF-8.
+
+    Returns:
+        Process exit code: 0 when all files decode, 1 otherwise.
+    """
     raw = subprocess.run(["git", "ls-files", "-z"], check=True, capture_output=True).stdout
     bad: list[str] = []
     for item in raw.split(b"\0"):
