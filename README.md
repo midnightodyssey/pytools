@@ -66,12 +66,12 @@ Requires Python >= 3.12. CI tests 3.12 and 3.14.
   ```
 
 - `pytools.clock` — NTP clock-offset check, stdlib only. `check_clock_offset(0.5)` queries
-  `time.cloudflare.com`, `time.google.com` and `time.windows.com` (3 samples each), takes the
+  `time.cloudflare.com`, `time.google.com` and `time.windows.com` (5 samples each), takes the
   minimum-RTT sample and raises `ClockSkewError` if its offset exceeds the threshold (seconds).
   Offset is true time minus local time: positive means the local clock is behind. Replies are
   verified (originate timestamp echo, server mode, stratum, leap indicator). Failed samples are
   kept in `OffsetReport.failures`; if every sample fails, `ClockError` is raised.
-  `measure_offset()` returns the report without a threshold; `query_ntp()` takes one sample.
+  `measure_offset()` returns the report without a threshold; `fetch_ntp_sample()` takes one sample; `SamplingConfig` tunes servers, samples, timeout and interval.
 
 ## Versioning
 
