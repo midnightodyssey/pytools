@@ -31,6 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC
 from email.utils import parsedate_to_datetime
+from typing import Final
 
 import httpx
 
@@ -47,6 +48,10 @@ __all__ = [
 ]
 
 log = logging.getLogger(__name__)
+
+#: Lowest and highest valid HTTP status codes accepted in ``retry_statuses``.
+MIN_HTTP_STATUS: Final = 100
+MAX_HTTP_STATUS: Final = 599
 
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE"})
 _ALWAYS_RETRY_STATUSES = frozenset({429})
@@ -143,7 +148,9 @@ class RetryPolicy:
         bad = [
             s
             for s in statuses
-            if not isinstance(s, int) or isinstance(s, bool) or not 100 <= s <= 599
+            if not isinstance(s, int)
+            or isinstance(s, bool)
+            or not MIN_HTTP_STATUS <= s <= MAX_HTTP_STATUS
         ]
         if bad:
             raise ConfigError(f"retry_statuses must be HTTP status codes, got {bad!r}")

@@ -1,4 +1,4 @@
-"""Standard logging setup.
+r"""Standard logging setup.
 
 STYLE.md only specifies the file handler (rotating, 2 MiB x 3, UTF-8, under
 ``%LOCALAPPDATA%\\<AppName>``), the format, and that setup must never block startup.

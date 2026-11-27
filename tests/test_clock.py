@@ -435,3 +435,14 @@ class TestTypes:
 
     def test_default_servers(self) -> None:
         assert DEFAULT_SERVERS == ("time.cloudflare.com", "time.google.com", "time.windows.com")
+
+
+class TestLive:
+    @pytest.mark.live
+    def test_measure_offset_against_real_servers(self) -> None:
+        report = measure_offset()
+        assert len(report.samples) >= 1
+        best = report.best
+        assert best.rtt >= 0
+        # Sanity bound only: this is not a skew check.
+        assert abs(best.offset) < 60

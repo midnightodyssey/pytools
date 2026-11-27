@@ -84,4 +84,7 @@ pip install -e ".[dev]"
 scripts/check.sh   # ruff, mypy (strict), pytest — same gates as release CI
 ```
 
+Live tests that hit real network services are skipped by default; run them with
+`PYTOOLS_LIVE=1 pytest -m live`.
+
 CI runs only on published releases and manual dispatch, not on PRs.

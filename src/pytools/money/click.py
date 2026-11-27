@@ -22,6 +22,7 @@ class DecimalParamType(click.ParamType):  # type: ignore[type-arg]
         param: click.Parameter | None,
         ctx: click.Context | None,
     ) -> Decimal:
+        """Convert ``value`` to ``Decimal`` (see ``parse_decimal``)."""
         # Click re-converts the (Decimal) option default; parse_decimal passes it through.
         try:
             return parse_decimal(value)

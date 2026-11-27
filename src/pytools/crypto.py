@@ -73,8 +73,10 @@ class KeyFileError(CryptoError):
 
 
 class InvalidKeyError(CryptoError):
-    """The key source is not a usable PEM private key (not PEM, malformed, or a password
-    was given for an unencrypted key)."""
+    """The key source is not a usable PEM private key.
+
+    Raised when it is not PEM, is malformed, or a password was given for an unencrypted key.
+    """
 
 
 class KeyPasswordError(CryptoError):
