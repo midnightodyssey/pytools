@@ -40,3 +40,13 @@ _Avoid_: Alert, error, urgent
 **Destination**:
 A named place notifications are posted to, such as `chief-of-staff`; each destination is one Slack webhook.
 _Avoid_: Channel, room, target
+
+### Clock
+
+**Clock offset**:
+True time minus the local clock, in seconds, as reported by NTP servers: positive means the local clock is behind.
+_Avoid_: Drift, skew (skew is the error raised when the offset is too large)
+
+**RTT**:
+The network round-trip time of one NTP exchange, excluding server processing; the sample with the lowest RTT has the tightest error bound and decides the offset.
+_Avoid_: Latency, ping
