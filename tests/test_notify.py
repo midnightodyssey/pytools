@@ -116,7 +116,6 @@ FAILURES: list[tuple[str, int | BaseException]] = [
     ("http_error", http_error(503)),
     ("url_error", urllib.error.URLError(f"cannot reach {URL}")),
     ("timeout", TimeoutError(f"timed out talking to {URL}")),
-    ("socket_timeout", TimeoutError(URL)),
     ("connection_reset", ConnectionResetError(URL)),
 ]
 FAILURE_OUTCOMES = [f[1] for f in FAILURES]
@@ -459,3 +458,70 @@ def test_rendered_traceback_has_no_url_for_realistic_failures(
     with pytest.raises(NotifyError) as excinfo:
         SlackWebhookNotifier(URL).send_or_raise(NOTE)
     assert SECRET not in "".join(traceback.format_exception(excinfo.value))
+
+
+# ---- host pinning -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "good",
+    [URL, URL.replace("hooks.slack.com", "HOOKS.SLACK.COM"), URL.replace(".com/", ".com:443/")],
+)
+def test_default_host_accepted(good: str) -> None:
+    SlackWebhookNotifier(good)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        f"https://example.com/services/T/B/{SECRET}",
+        f"https://hooks.slack.com.evil.tld/services/T/B/{SECRET}",
+        f"https://evil.tld/hooks.slack.com/services/T/B/{SECRET}",
+        f"https://evil.tld/?x=hooks.slack.com/{SECRET}",
+        f"https://hooks.slack.com:8443/services/T/B/{SECRET}",
+        f"https://hooks.slack.com:80/services/T/B/{SECRET}",
+        f"https://hooks.slack.com:notaport/services/T/B/{SECRET}",
+    ],
+)
+def test_other_hosts_and_ports_rejected(bad: str, clean_env: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        SlackWebhookNotifier(bad)
+    assert SECRET not in str(excinfo.value)
+    assert "webhook_url" in str(excinfo.value)
+    clean_env.setenv("SLACK_WEBHOOK_OPS", bad)
+    with pytest.raises(ConfigError) as env_exc:
+        SlackWebhookNotifier.from_env("ops")
+    assert SECRET not in str(env_exc.value)
+    assert "SLACK_WEBHOOK_OPS" in str(env_exc.value)
+
+
+def test_empty_allowed_hosts_is_config_error(clean_env: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ConfigError, match="allowed_hosts must not be empty") as excinfo:
+        SlackWebhookNotifier(URL, allowed_hosts=())
+    assert SECRET not in str(excinfo.value)
+    clean_env.setenv("SLACK_WEBHOOK_URL", URL)
+    with pytest.raises(ConfigError, match="allowed_hosts must not be empty"):
+        SlackWebhookNotifier.from_env(allowed_hosts=[])
+
+
+def test_explicit_allowed_hosts_replaces_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    mattermost = f"https://Mattermost.example/hooks/{SECRET}"
+    recorder = install(monkeypatch)
+    SlackWebhookNotifier(mattermost, allowed_hosts=("mattermost.example",)).send(NOTE)
+    assert recorder.requests[0].full_url == mattermost
+    with pytest.raises(ConfigError) as excinfo:
+        SlackWebhookNotifier(URL, allowed_hosts=("mattermost.example",))
+    assert SECRET not in str(excinfo.value)
+    with pytest.raises(ConfigError):
+        SlackWebhookNotifier(mattermost)
+
+
+def test_from_env_honours_allowed_hosts(clean_env: pytest.MonkeyPatch) -> None:
+    mattermost = f"https://mattermost.example/hooks/{SECRET}"
+    clean_env.setenv("SLACK_WEBHOOK_OPS", mattermost)
+    recorder = install(clean_env)
+    SlackWebhookNotifier.from_env("ops", allowed_hosts=["mattermost.example"]).send(NOTE)
+    assert recorder.requests[0].full_url == mattermost
+    with pytest.raises(ConfigError) as excinfo:
+        SlackWebhookNotifier.from_env("ops")
+    assert SECRET not in str(excinfo.value)

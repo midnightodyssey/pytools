@@ -18,6 +18,7 @@ import logging
 import os
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
 from email.message import Message
 from typing import IO, Final
 from urllib.parse import urlsplit
@@ -33,6 +34,8 @@ DEFAULT_TIMEOUT: Final = 5.0
 MAX_TEXT_LENGTH: Final = 38_000
 TRUNCATION_MARKER: Final = "…(truncated)"
 DEFAULT_ENV_VAR: Final = "SLACK_WEBHOOK_URL"
+DEFAULT_ALLOWED_HOSTS: Final = ("hooks.slack.com",)
+HTTPS_PORT: Final = 443
 
 _PREFIXES: Final = {
     Severity.INFO: "",
@@ -49,12 +52,20 @@ def _env_var_name(destination: str) -> str:
     return "SLACK_WEBHOOK_" + destination.upper().replace("-", "_")
 
 
-def _validate_url(url: str, source: str) -> str:
+def _normalise_hosts(allowed_hosts: Iterable[str]) -> frozenset[str]:
+    hosts = frozenset(host.strip().lower() for host in allowed_hosts if host.strip())
+    if not hosts:
+        raise ConfigError("allowed_hosts must not be empty")
+    return hosts
+
+
+def _validate_url(url: str, source: str, allowed_hosts: frozenset[str]) -> str:
     """Require a clean absolute https URL. Messages name ``source``, never the URL itself.
 
     Rejects non-ASCII, whitespace/control characters and userinfo: the first two make
     ``http.client`` raise errors whose text embeds the path (the secret), and none of them
-    is ever valid in a webhook URL.
+    is ever valid in a webhook URL. The host must be an exact member of ``allowed_hosts``
+    (no substring or suffix matching) and any explicit port must be 443.
     """
     stripped = url.strip()
     problem = f"{source} must be a plain https webhook URL (value not shown)"
@@ -63,10 +74,18 @@ def _validate_url(url: str, source: str) -> str:
     try:
         parts = urlsplit(stripped)
         has_userinfo = parts.username is not None or parts.password is not None
+        port = parts.port
     except ValueError as exc:
         raise ConfigError(problem) from exc
     if parts.scheme != "https" or not parts.netloc or has_userinfo:
         raise ConfigError(problem)
+    if parts.hostname not in allowed_hosts:
+        allowed = ", ".join(sorted(allowed_hosts))
+        raise ConfigError(f"{source} host is not in allowed_hosts ({allowed}); value not shown")
+    if port is not None and port != HTTPS_PORT:
+        raise ConfigError(
+            f"{source} must use the default https port {HTTPS_PORT} (value not shown)"
+        )
     return stripped
 
 
@@ -114,14 +133,21 @@ class SlackWebhookNotifier:
     instance attribute, so a traceback renderer that captures frame locals (Sentry, rich
     ``show_locals``) will see it; scrub such tools' output if that matters.
 
+    The scope is Slack incoming webhooks only. The URL's host is pinned to ``allowed_hosts``
+    (default ``hooks.slack.com``, exact match, port 443 only) so a misconfigured env var
+    cannot send notifications to another host. A caller with a Slack-compatible endpoint
+    passes its host explicitly; there is no wildcard.
+
     Args:
         webhook_url: The incoming-webhook URL. Must be a plain ``https`` URL: no userinfo,
             whitespace, control or non-ASCII characters.
         timeout: Per-attempt timeout in seconds; must be positive.
         destination: Name used in log lines and ``repr``; ``"default"`` when omitted.
+        allowed_hosts: Hostnames the URL may use (case-insensitive, exact match).
 
     Raises:
-        ConfigError: If the URL is not ``https`` or ``timeout`` is not positive. The
+        ConfigError: If the URL is not ``https`` on an allowed host, ``allowed_hosts`` is
+            empty or ``timeout`` is not positive. The
             message never contains the URL.
     """
 
@@ -131,16 +157,22 @@ class SlackWebhookNotifier:
         *,
         timeout: float = DEFAULT_TIMEOUT,
         destination: str | None = None,
+        allowed_hosts: Iterable[str] = DEFAULT_ALLOWED_HOSTS,
     ) -> None:
         if timeout <= 0:
             raise ConfigError(f"timeout must be positive, got {timeout}")
-        self._url = _validate_url(webhook_url, "webhook_url")
+        hosts = _normalise_hosts(allowed_hosts)
+        self._url = _validate_url(webhook_url, "webhook_url", hosts)
         self._timeout = timeout
         self._destination = destination or "default"
 
     @classmethod
     def from_env(
-        cls, destination: str | None = None, *, timeout: float = DEFAULT_TIMEOUT
+        cls,
+        destination: str | None = None,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        allowed_hosts: Iterable[str] = DEFAULT_ALLOWED_HOSTS,
     ) -> SlackWebhookNotifier:
         """Build a notifier from the environment.
 
@@ -148,14 +180,17 @@ class SlackWebhookNotifier:
         falls back to ``SLACK_WEBHOOK_URL``. An empty value counts as unset.
 
         Raises:
-            ConfigError: If neither variable is set, or the value is not an https URL.
+            ConfigError: If neither variable is set, or the value is not an https URL on an
+                allowed host.
         """
+        hosts = _normalise_hosts(allowed_hosts)
         names = [_env_var_name(destination)] if destination else []
         names.append(DEFAULT_ENV_VAR)
         for name in names:
             value = os.environ.get(name, "").strip()
             if value:
-                return cls(_validate_url(value, name), timeout=timeout, destination=destination)
+                url = _validate_url(value, name, hosts)
+                return cls(url, timeout=timeout, destination=destination, allowed_hosts=hosts)
         raise ConfigError(f"no Slack webhook configured; set one of: {', '.join(names)}")
 
     def __repr__(self) -> str:

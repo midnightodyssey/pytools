@@ -56,7 +56,9 @@ Requires Python >= 3.12. CI tests 3.12 and 3.14.
   webhook URL is a secret and never reaches a log line, `repr` or exception message.
   `SlackWebhookNotifier.from_env("chief-of-staff")` reads `SLACK_WEBHOOK_CHIEF_OF_STAFF`, then
   `SLACK_WEBHOOK_URL`. `send()` never raises on delivery failure (WARNING + `delivered=False`);
-  `send_or_raise()` raises `NotifyError`. One attempt, ~5s timeout, no retry.
+  `send_or_raise()` raises `NotifyError`. One attempt, ~5s timeout, no retry. The URL host is
+  pinned to `hooks.slack.com` (port 443 only); pass `allowed_hosts=("host",)` to use a
+  Slack-compatible endpoint.
 
   ```python
   notifier = SlackWebhookNotifier.from_env("chief-of-staff")
