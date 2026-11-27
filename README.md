@@ -8,7 +8,7 @@ parsing, typed errors, and standard logging setup. Used by our projects.
 ## Install
 
 ```
-pip install "pytools @ git+https://github.com/midnightodyssey/pytools.git@v0.3.0"
+pip install "pytools @ git+https://github.com/midnightodyssey/pytools.git@v0.4.0"
 ```
 
 Optional extras: `pytools[pydantic]`, `pytools[click]`, `pytools[http]`, `pytools[crypto]`.
@@ -51,6 +51,19 @@ Requires Python >= 3.12. CI tests 3.12 and 3.14.
   armed), `os.stat` on every `status()` call (no caching), atomic `arm()`, and a hand `touch`
   arms it. File contents never decide armed; JSON `{armed_at, reason, actor}` is compatible with
   predarb's format. `raise_if_armed()` raises `KillSwitchArmedError`.
+
+- `pytools.notify` — best-effort Slack incoming-webhook notifications, stdlib only. The
+  webhook URL is a secret and never reaches a log line, `repr` or exception message.
+  `SlackWebhookNotifier.from_env("chief-of-staff")` reads `SLACK_WEBHOOK_CHIEF_OF_STAFF`, then
+  `SLACK_WEBHOOK_URL`. `send()` never raises on delivery failure (WARNING + `delivered=False`);
+  `send_or_raise()` raises `NotifyError`. One attempt, ~5s timeout, no retry. The URL host is
+  pinned to `hooks.slack.com` (port 443 only); pass `allowed_hosts=("host",)` to use a
+  Slack-compatible endpoint.
+
+  ```python
+  notifier = SlackWebhookNotifier.from_env("chief-of-staff")
+  notifier.send(Notification("Kill switch armed", "feed down", Severity.CRITICAL))
+  ```
 
 ## Versioning
 
